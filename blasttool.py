@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import subprocess
 import gzip
+import shutil  # Add this import
 
 
 def read_bacteria_info(tsv_file):
@@ -156,13 +157,90 @@ def download_and_check_file(assembly_accession, assembly_name, file_type, output
     return True
 
 
+def decompress_gz_file(gz_file, output_dir):
+    """Decompress a .gz file.
+
+    Args:
+        gz_file: Path to the .gz file.
+        output_dir: Directory to save the decompressed file.
+
+    Returns:
+        Path to the decompressed file.
+    """
+    decompressed_file = os.path.join(output_dir, os.path.basename(gz_file).replace('.gz', ''))
+    with gzip.open(gz_file, 'rb') as f_in:
+        with open(decompressed_file, 'wb') as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    return decompressed_file
+
+
+def create_blast_db(fasta_file, db_type='nucl'):
+    """Create a BLAST database from a FASTA file.
+
+    Args:
+        fasta_file: Path to the FASTA file.
+        db_type: Type of the database ('nucl' for nucleotide, 'prot' for protein).
+
+    Returns:
+        None
+    """
+    cmd = ['makeblastdb', '-in', fasta_file, '-dbtype', db_type]
+    subprocess.run(cmd, check=True)
+
+
+def download_data(bacteria_info, genome_dir, protein_dir, log_file, genome_complete_downloads, protein_complete_downloads, failed_downloads):
+    """Download genome and protein data.
+
+    Args:
+        bacteria_info: DataFrame containing bacterial genome information.
+        genome_dir: Directory to save genome files.
+        protein_dir: Directory to save protein files.
+        log_file: Path to the wget log file.
+        genome_complete_downloads: Set of completed genome downloads.
+        protein_complete_downloads: Set of completed protein downloads.
+        failed_downloads: Set of failed downloads.
+    """
+    downloaded_accessions = genome_complete_downloads.intersection(protein_complete_downloads)
+
+    for index, row in bacteria_info.iterrows():
+        assembly_accession = row['Assembly Accession']
+        assembly_name = row['Assembly Name']
+
+        # Skip already downloaded GCA and GCF with the same ID
+        base_accession = assembly_accession.split('_')[1]
+        if base_accession in downloaded_accessions:
+            continue
+
+        # Download and check genome file
+        if download_and_check_file(assembly_accession, assembly_name, 'genomic', genome_dir, log_file, genome_complete_downloads, failed_downloads):
+            downloaded_accessions.add(base_accession)
+
+        # Download and check protein file
+        download_and_check_file(assembly_accession, assembly_name, 'protein', protein_dir, log_file, protein_complete_downloads, failed_downloads)
+
+
+def decompress_and_create_db(directory, extension, db_type):
+    """Decompress files and create BLAST databases.
+
+    Args:
+        directory: Directory containing the files.
+        extension: File extension to look for.
+        db_type: Type of the database ('nucl' for nucleotide, 'prot' for protein).
+    """
+    for filename in os.listdir(directory):
+        if filename.endswith(extension):
+            gz_file = os.path.join(directory, filename)
+            decompressed_file = decompress_gz_file(gz_file, directory)
+            create_blast_db(decompressed_file, db_type=db_type)
+
+
 def main():
     tsv_file = './bacteria20.tsv'
     output_dir = os.getcwd()
     genome_dir = os.path.join(output_dir, 'bacteria_genome')
     protein_dir = os.path.join(output_dir, 'bacteria_protein')
-    complete_file = 'complete_downloads.txt'
-    incomplete_file = 'incomplete_downloads.txt'
+    genome_complete_file = 'genome_complete_downloads.txt'
+    protein_complete_file = 'protein_complete_downloads.txt'
     faalist_file = 'faalist.txt'
     failed_file = 'failed_downloads.txt'
     log_file = 'wget.log'
@@ -176,17 +254,17 @@ def main():
     bacteria_info = read_bacteria_info(tsv_file)
 
     # Read the lists of completed and incomplete downloads
-    if os.path.exists(complete_file):
-        with open(complete_file, 'r') as f:
-            complete_downloads = set(f.read().splitlines())
+    if os.path.exists(genome_complete_file):
+        with open(genome_complete_file, 'r') as f:
+            genome_complete_downloads = set(f.read().splitlines())
     else:
-        complete_downloads = set()
+        genome_complete_downloads = set()
 
-    if os.path.exists(incomplete_file):
-        with open(incomplete_file, 'r') as f:
-            incomplete_downloads = set(f.read().splitlines())
+    if os.path.exists(protein_complete_file):
+        with open(protein_complete_file, 'r') as f:
+            protein_complete_downloads = set(f.read().splitlines())
     else:
-        incomplete_downloads = set()
+        protein_complete_downloads = set()
 
     if os.path.exists(faalist_file):
         with open(faalist_file, 'r') as f:
@@ -201,36 +279,29 @@ def main():
         failed_downloads = set()
 
     # Scan existing genome and protein files
-    complete_downloads.update(scan_existing_files(genome_dir, '_genomic.fna.gz'))
-    faa_list.update(scan_existing_files(protein_dir, '_protein.faa.gz'))
+    genome_complete = scan_existing_files(genome_dir, '_genomic.fna.gz')
+    protein_complete = scan_existing_files(protein_dir, '_protein.faa.gz')
 
-    downloaded_accessions = set()
-    downloaded_accessions = complete_downloads.intersection(faa_list)
+    genome_complete_downloads.update(genome_complete)
+    protein_complete_downloads.update(protein_complete)
 
-    for index, row in bacteria_info.iterrows():
-        assembly_accession = row['Assembly Accession']
-        assembly_name = row['Assembly Name']
-
-        # Skip already downloaded GCA and GCF with the same ID
-        base_accession = assembly_accession.split('_')[1]
-        if base_accession in downloaded_accessions:
-            continue
-
-        # Download and check genome file
-        if download_and_check_file(assembly_accession, assembly_name, 'genomic', genome_dir, log_file, complete_downloads, failed_downloads):
-            downloaded_accessions.add(base_accession)
-
-        # Download and check protein file
-        download_and_check_file(assembly_accession, assembly_name, 'protein', protein_dir, log_file, faa_list, failed_downloads)
+    # Download data
+    #download_data(bacteria_info, genome_dir, protein_dir, log_file, genome_complete_downloads, protein_complete_downloads, failed_downloads)
 
     # Save the lists of completed and incomplete downloads
-    update_download_lists(complete_file, incomplete_file, complete_downloads, incomplete_downloads)
+    #update_download_lists(genome_complete_file, protein_complete_file, genome_complete_downloads, protein_complete_downloads)
 
     # Save the list of Assembly Accessions with faa.gz files
-    update_faa_list(faalist_file, faa_list)
+    #update_faa_list(faalist_file, protein_complete_downloads)
 
     # Save the list of failed downloads
-    update_failed_list(failed_file, failed_downloads)
+    #update_failed_list(failed_file, failed_downloads)
+
+    # Decompress and create BLAST databases for genome files
+    decompress_and_create_db(genome_dir, '_genomic.fna.gz', db_type='nucl')
+
+    # Decompress and create BLAST databases for protein files
+    decompress_and_create_db(protein_dir, '_protein.faa.gz', db_type='prot')
 
 
 if __name__ == '__main__':

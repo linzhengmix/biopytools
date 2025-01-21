@@ -279,6 +279,42 @@ def run_tblastn(query_file, db_dir, output_dir):
             f.write("\n# tblastn run completed\n")
 
 
+def run_blastp(query_file, db_dir, output_dir):
+    """Run blastp using the sequences from the query file.
+
+    Args:
+        query_file: Path to the query file.
+        db_dir: Directory containing the BLAST databases.
+        output_dir: Directory to save the output files.
+
+    Returns:
+        None
+    """
+    db_dirs = [os.path.join(db_dir, d) for d in os.listdir(db_dir) if os.path.isdir(os.path.join(db_dir, d))]
+    for db_subdir in db_dirs:
+        db_name = os.path.join(db_subdir, os.path.basename(db_subdir))
+        output_file = os.path.join(output_dir, f"{os.path.basename(db_subdir)}_blastp_results.txt")
+        
+        # Check if the output file already has the completion marker
+        if os.path.exists(output_file):
+            with open(output_file, 'r') as f:
+                if "# blastp run completed" in f.read():
+                    print(f"Skipping {os.path.basename(db_subdir)} as it is already completed.")
+                    continue
+        
+        print(f"Running blastp for {os.path.basename(db_subdir)}...")
+        cmd = [
+            'blastp',
+            '-query', query_file,
+            '-db', db_name,
+            '-out', output_file,
+            '-outfmt', '6 qseqid sseqid qstart qend sstart send evalue qcovhsp qcovs sframe sseq qseq pident'
+        ]
+        subprocess.run(cmd, check=True)
+        with open(output_file, 'a') as f:
+            f.write("\n# blastp run completed\n")
+
+
 def main():
     tsv_file = './bacteria20.tsv'
     output_dir = os.getcwd()
@@ -291,6 +327,7 @@ def main():
     log_file = 'wget.log'
     query_file = './copper_protein_as_tblastn_query.txt'
     tblastn_output_dir = os.path.join(output_dir, 'tblastn_results')
+    blastp_output_dir = os.path.join(output_dir, 'blastp_results')
 
     # Create directories to save genome and protein files
     if not os.path.exists(genome_dir):
@@ -299,6 +336,8 @@ def main():
         os.makedirs(protein_dir)
     if not os.path.exists(tblastn_output_dir):
         os.makedirs(tblastn_output_dir)
+    if not os.path.exists(blastp_output_dir):
+        os.makedirs(blastp_output_dir)
 
     bacteria_info = read_bacteria_info(tsv_file)
 
@@ -354,6 +393,9 @@ def main():
 
     # Run tblastn
     run_tblastn(query_file, genome_dir, tblastn_output_dir)
+
+    # Run blastp
+    run_blastp(query_file, protein_dir, blastp_output_dir)
 
 if __name__ == '__main__':
     main()

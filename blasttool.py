@@ -184,8 +184,12 @@ def create_blast_db(fasta_file, db_type='nucl'):
     Returns:
         None
     """
-    cmd = ['makeblastdb', '-in', fasta_file, '-dbtype', db_type]
-    subprocess.run(cmd, check=True)
+    db_name = os.path.splitext(fasta_file)[0]
+    if not os.path.exists(f"{db_name}.nhr") and not os.path.exists(f"{db_name}.phr"):
+        cmd = ['makeblastdb', '-in', fasta_file, '-dbtype', db_type]
+        subprocess.run(cmd, check=True)
+    else:
+        print(f"BLAST database for {fasta_file} already exists. Skipping creation.")
 
 
 def download_data(bacteria_info, genome_dir, protein_dir, log_file, genome_complete_downloads, protein_complete_downloads, failed_downloads):

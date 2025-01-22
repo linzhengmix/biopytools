@@ -5,6 +5,23 @@ import gzip
 import shutil
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
+import logging
+from logging.handlers import QueueHandler, QueueListener
+import queue
+
+# Configure logging
+log_queue = queue.Queue()
+queue_handler = QueueHandler(log_queue)
+formatter = logging.Formatter('%(asctime)s %(message)s')
+handler = logging.FileHandler('wget.log')
+handler.setFormatter(formatter)
+listener = QueueListener(log_queue, handler)
+listener.start()
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(queue_handler)
 
 
 def read_bacteria_info(tsv_file):
@@ -19,21 +36,23 @@ def read_bacteria_info(tsv_file):
     return pd.read_csv(tsv_file, sep='\t')
 
 
-def download_genome_wget(ftp_url, output_dir, filename, log_file):
+def download_genome_wget(ftp_url, output_dir, filename):
     """Download bacterial genome file using wget.
 
     Args:
         ftp_url: FTP URL.
         output_dir: Directory to save the downloaded file.
         filename: Name of the downloaded file.
-        log_file: Path to the wget log file.
 
     Returns:
         Path to the downloaded file.
     """
     local_filepath = os.path.join(output_dir, filename)
-    cmd = ['wget', '-O', local_filepath, ftp_url, '-a', log_file]
-    subprocess.run(cmd, check=True)
+    cmd = ['wget', '-O', local_filepath, ftp_url]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    logger.info(result.stdout)
+    if result.stderr:
+        logger.error(result.stderr)
     return local_filepath
 
 
@@ -52,7 +71,7 @@ def check_file_integrity(filepath):
                 pass
         return True
     except Exception as e:
-        print(f"File integrity check failed for {filepath}: {e}")
+        logger.error(f"File integrity check failed for {filepath}: {e}")
         return False
 
 
@@ -70,17 +89,6 @@ def update_download_lists(complete_file, incomplete_file, complete_downloads, in
 
     with open(incomplete_file, 'w') as f:
         f.write('\n'.join(incomplete_downloads))
-
-
-def update_faa_list(faalist_file, faa_list):
-    """Update the list of Assembly Accessions with faa.gz files.
-
-    Args:
-        faalist_file: Path to the faa.gz files list file.
-        faa_list: Set of Assembly Accessions with faa.gz files.
-    """
-    with open(faalist_file, 'w') as f:
-        f.write('\n'.join(faa_list))
 
 
 def update_failed_list(failed_file, failed_downloads):
@@ -114,7 +122,7 @@ def scan_existing_files(directory, extension):
     return existing_files
 
 
-def download_and_check_file(assembly_accession, assembly_name, file_type, output_dir, log_file, download_list, failed_downloads):
+def download_and_check_file(assembly_accession, assembly_name, file_type, output_dir, download_list, failed_downloads, lock):
     """Download and check the integrity of a file.
 
     Args:
@@ -122,9 +130,9 @@ def download_and_check_file(assembly_accession, assembly_name, file_type, output
         assembly_name: Assembly Name of the genome.
         file_type: File type (genomic or protein).
         output_dir: Directory to save the file.
-        log_file: Path to the wget log file.
         download_list: Set of downloaded files.
         failed_downloads: Set of failed downloads.
+        lock: Threading lock for thread safety.
 
     Returns:
         Boolean indicating whether the download and integrity check were successful.
@@ -142,19 +150,21 @@ def download_and_check_file(assembly_accession, assembly_name, file_type, output
     if not os.path.exists(file_path):
         for attempt in range(3):
             try:
-                print(f"Downloading {filename} from {ftp_url} (Attempt {attempt + 1})")
-                download_genome_wget(ftp_url, output_dir, filename, log_file)
+                logger.info(f"Downloading {filename} from {ftp_url} (Attempt {attempt + 1})")
+                download_genome_wget(ftp_url, output_dir, filename)
 
                 if check_file_integrity(file_path):
-                    print(f"Download and integrity check passed for {filename}")
-                    download_list.add(assembly_accession)
+                    logger.info(f"Download and integrity check passed for {filename}")
+                    with lock:
+                        download_list.add(assembly_accession)
                     return True
                 else:
-                    print(f"Download or integrity check failed for {filename}")
-            except subprocess.CalledProcessError:
-                print(f"Failed to download {filename} (Attempt {attempt + 1})")
+                    logger.error(f"Download or integrity check failed for {filename}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to download {filename} (Attempt {attempt + 1}): {e}")
         else:
-            failed_downloads.add(assembly_accession)
+            with lock:
+                failed_downloads.add(assembly_accession)
             return False
     return True
 
@@ -190,26 +200,26 @@ def create_blast_db(fasta_file, db_type='nucl'):
         None
     """
     db_name = os.path.splitext(fasta_file)[0]
-    print(f"Creating BLAST database for {os.path.basename(fasta_file)}")
+    logger.info(f"Creating BLAST database for {os.path.basename(fasta_file)}")
     db_files = [f"{db_name}.fna.{ext}" for ext in ('nhr', 'nin', 'nsq', 'ndb', 'not', 'ntf', 'nto')] if db_type == 'nucl' else [f"{db_name}.faa.{ext}" for ext in ('phr', 'pin', 'psq', 'pdb', 'pot', 'ptf', 'pto')]
     if not all(os.path.exists(db_file) for db_file in db_files):
         cmd = ['makeblastdb', '-in', fasta_file, '-dbtype', db_type]
         subprocess.run(cmd, check=True)
     else:
-        print(f"BLAST database for {os.path.basename(fasta_file)} already exists. Skipping creation.")
+        logger.info(f"BLAST database for {os.path.basename(fasta_file)} already exists. Skipping creation.")
 
 
-def download_data(bacteria_info, genome_dir, protein_dir, log_file, genome_complete_downloads, protein_complete_downloads, failed_downloads):
+def download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downloads, protein_complete_downloads, failed_downloads, lock):
     """Download genome and protein data.
 
     Args:
         bacteria_info: DataFrame containing bacterial genome information.
         genome_dir: Directory to save genome files.
         protein_dir: Directory to save protein files.
-        log_file: Path to the wget log file.
         genome_complete_downloads: Set of completed genome downloads.
         protein_complete_downloads: Set of completed protein downloads.
         failed_downloads: Set of failed downloads.
+        lock: Threading lock for thread safety.
     """
     downloaded_accessions = genome_complete_downloads.intersection(protein_complete_downloads)
 
@@ -223,11 +233,11 @@ def download_data(bacteria_info, genome_dir, protein_dir, log_file, genome_compl
             continue
 
         # Download and check genome file
-        if download_and_check_file(assembly_accession, assembly_name, 'genomic', genome_dir, log_file, genome_complete_downloads, failed_downloads):
+        if download_and_check_file(assembly_accession, assembly_name, 'genomic', genome_dir, genome_complete_downloads, failed_downloads, lock):
             downloaded_accessions.add(base_accession)
 
         # Download and check protein file
-        download_and_check_file(assembly_accession, assembly_name, 'protein', protein_dir, log_file, protein_complete_downloads, failed_downloads)
+        download_and_check_file(assembly_accession, assembly_name, 'protein', protein_dir, protein_complete_downloads, failed_downloads, lock)
 
 
 def decompress_and_create_db_for_file(gz_file, output_dir, db_type):
@@ -253,16 +263,15 @@ def decompress_and_create_db(directory, extension, db_type):
         extension: File extension to look for.
         db_type: Type of the database ('nucl' for nucleotide, 'prot' for protein).
     """
-    threads = []
-    for filename in os.listdir(directory):
-        if filename.endswith(extension):
-            gz_file = os.path.join(directory, filename)
-            thread = threading.Thread(target=decompress_and_create_db_for_file, args=(gz_file, directory, db_type))
-            thread.start()
-            threads.append(thread)
-
-    for thread in threads:
-        thread.join()
+    max_threads = os.cpu_count() // 3
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = []
+        for filename in os.listdir(directory):
+            if filename.endswith(extension):
+                gz_file = os.path.join(directory, filename)
+                futures.append(executor.submit(decompress_and_create_db_for_file, gz_file, directory, db_type))
+        for future in futures:
+            future.result()
 
 
 def run_blast_for_genome(query_file, db_subdir, db_dir, output_dir, blast_type):
@@ -285,10 +294,10 @@ def run_blast_for_genome(query_file, db_subdir, db_dir, output_dir, blast_type):
     if os.path.exists(output_file):
         with open(output_file, 'r') as f:
             if f"#{blast_type} run completed" in f.read():
-                print(f"Skipping {db_subdir} as it is already completed.")
+                logger.info(f"Skipping {db_subdir} as it is already completed.")
                 return
 
-    print(f"Running {blast_type} for {db_subdir}...")
+    logger.info(f"Running {blast_type} for {db_subdir}...")
     cmd = [
         blast_type,
         '-query', query_file,
@@ -352,9 +361,7 @@ def main():
     protein_dir = os.path.join(output_dir, 'bacteria_protein')
     genome_complete_file = 'genome_complete_downloads.txt'
     protein_complete_file = 'protein_complete_downloads.txt'
-    faalist_file = 'faalist.txt'
     failed_file = 'failed_downloads.txt'
-    log_file = 'wget.log'
     query_file = './copper_protein_as_tblastn_query.txt'
     tblastn_output_dir = os.path.join(output_dir, 'tblastn_results')
     blastp_output_dir = os.path.join(output_dir, 'blastp_results')
@@ -384,12 +391,6 @@ def main():
     else:
         protein_complete_downloads = set()
 
-    if os.path.exists(faalist_file):
-        with open(faalist_file, 'r') as f:
-            faa_list = set(f.read().splitlines())
-    else:
-        faa_list = set()
-
     if os.path.exists(failed_file):
         with open(failed_file, 'r') as f:
             failed_downloads = set(f.read().splitlines())
@@ -403,14 +404,13 @@ def main():
     genome_complete_downloads.update(genome_complete)
     protein_complete_downloads.update(protein_complete)
 
+    lock = threading.Lock()
+
     # Download data
-    download_data(bacteria_info, genome_dir, protein_dir, log_file, genome_complete_downloads, protein_complete_downloads, failed_downloads)
+    download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downloads, protein_complete_downloads, failed_downloads, lock)
 
     # Save the lists of completed and incomplete downloads
     update_download_lists(genome_complete_file, protein_complete_file, genome_complete_downloads, protein_complete_downloads)
-
-    # Save the list of Assembly Accessions with faa.gz files
-    update_faa_list(faalist_file, protein_complete_downloads)
 
     # Save the list of failed downloads
     update_failed_list(failed_file, failed_downloads)

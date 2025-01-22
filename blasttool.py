@@ -3,6 +3,8 @@ import pandas as pd
 import subprocess
 import gzip
 import shutil
+import sys
+import threading
 
 
 def read_bacteria_info(tsv_file):
@@ -228,6 +230,21 @@ def download_data(bacteria_info, genome_dir, protein_dir, log_file, genome_compl
         download_and_check_file(assembly_accession, assembly_name, 'protein', protein_dir, log_file, protein_complete_downloads, failed_downloads)
 
 
+def decompress_and_create_db_for_file(gz_file, output_dir, db_type):
+    """Decompress a file and create a BLAST database.
+
+    Args:
+        gz_file: Path to the .gz file.
+        output_dir: Directory to save the decompressed file.
+        db_type: Type of the database ('nucl' for nucleotide, 'prot' for protein).
+
+    Returns:
+        None
+    """
+    decompressed_file = decompress_gz_file(gz_file, output_dir)
+    create_blast_db(decompressed_file, db_type=db_type)
+
+
 def decompress_and_create_db(directory, extension, db_type):
     """Decompress files and create BLAST databases.
 
@@ -236,11 +253,52 @@ def decompress_and_create_db(directory, extension, db_type):
         extension: File extension to look for.
         db_type: Type of the database ('nucl' for nucleotide, 'prot' for protein).
     """
+    threads = []
     for filename in os.listdir(directory):
         if filename.endswith(extension):
             gz_file = os.path.join(directory, filename)
-            decompressed_file = decompress_gz_file(gz_file, directory)
-            create_blast_db(decompressed_file, db_type=db_type)
+            thread = threading.Thread(target=decompress_and_create_db_for_file, args=(gz_file, directory, db_type))
+            thread.start()
+            threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
+
+def run_blast_for_genome(query_file, db_subdir, db_dir, output_dir, blast_type):
+    """Run BLAST for a specific genome.
+
+    Args:
+        query_file: Path to the query file.
+        db_subdir: Subdirectory of the BLAST database.
+        db_dir: Directory containing the BLAST databases.
+        output_dir: Directory to save the output files.
+        blast_type: Type of BLAST to run ('tblastn' or 'blastp').
+
+    Returns:
+        None
+    """
+    db_name = os.path.join(db_dir, db_subdir, db_subdir)
+    output_file = os.path.join(output_dir, f"{db_subdir}_{blast_type}_results.txt")
+
+    # Check if the output file already has the completion marker
+    if os.path.exists(output_file):
+        with open(output_file, 'r') as f:
+            if f"#{blast_type} run completed" in f.read():
+                print(f"Skipping {db_subdir} as it is already completed.")
+                return
+
+    print(f"Running {blast_type} for {db_subdir}...")
+    cmd = [
+        blast_type,
+        '-query', query_file,
+        '-db', db_name,
+        '-out', output_file,
+        '-outfmt', '6 qseqid sseqid qstart qend sstart send evalue qcovhsp qcovs sframe sseq qseq pident'
+    ]
+    subprocess.run(cmd, check=True)
+    with open(output_file, 'a') as f:
+        f.write(f"\n# {blast_type} run completed\n")
 
 
 def run_tblastn(query_file, db_dir, output_dir):
@@ -254,29 +312,15 @@ def run_tblastn(query_file, db_dir, output_dir):
     Returns:
         None
     """
-    db_dirs = [os.path.join(db_dir, d) for d in os.listdir(db_dir) if os.path.isdir(os.path.join(db_dir, d))]
+    db_dirs = [d for d in os.listdir(db_dir) if os.path.isdir(os.path.join(db_dir, d))]
+    threads = []
     for db_subdir in db_dirs:
-        db_name = os.path.join(db_subdir, os.path.basename(db_subdir))
-        output_file = os.path.join(output_dir, f"{os.path.basename(db_subdir)}_tblastn_results.txt")
-        
-        # Check if the output file already has the completion marker
-        if os.path.exists(output_file):
-            with open(output_file, 'r') as f:
-                if "# tblastn run completed" in f.read():
-                    print(f"Skipping {os.path.basename(db_subdir)} as it is already completed.")
-                    continue
-        
-        print(f"Running tblastn for {os.path.basename(db_subdir)}...")
-        cmd = [
-            'tblastn',
-            '-query', query_file,
-            '-db', db_name,
-            '-out', output_file,
-            '-outfmt', '6 qseqid sseqid qstart qend sstart send evalue qcovhsp qcovs sframe sseq qseq pident'
-        ]
-        subprocess.run(cmd, check=True)
-        with open(output_file, 'a') as f:
-            f.write("\n# tblastn run completed\n")
+        thread = threading.Thread(target=run_blast_for_genome, args=(query_file, db_subdir, db_dir, output_dir, 'tblastn'))
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
 
 
 def run_blastp(query_file, db_dir, output_dir):
@@ -290,29 +334,15 @@ def run_blastp(query_file, db_dir, output_dir):
     Returns:
         None
     """
-    db_dirs = [os.path.join(db_dir, d) for d in os.listdir(db_dir) if os.path.isdir(os.path.join(db_dir, d))]
+    db_dirs = [d for d in os.listdir(db_dir) if os.path.isdir(os.path.join(db_dir, d))]
+    threads = []
     for db_subdir in db_dirs:
-        db_name = os.path.join(db_subdir, os.path.basename(db_subdir))
-        output_file = os.path.join(output_dir, f"{os.path.basename(db_subdir)}_blastp_results.txt")
-        
-        # Check if the output file already has the completion marker
-        if os.path.exists(output_file):
-            with open(output_file, 'r') as f:
-                if "# blastp run completed" in f.read():
-                    print(f"Skipping {os.path.basename(db_subdir)} as it is already completed.")
-                    continue
-        
-        print(f"Running blastp for {os.path.basename(db_subdir)}...")
-        cmd = [
-            'blastp',
-            '-query', query_file,
-            '-db', db_name,
-            '-out', output_file,
-            '-outfmt', '6 qseqid sseqid qstart qend sstart send evalue qcovhsp qcovs sframe sseq qseq pident'
-        ]
-        subprocess.run(cmd, check=True)
-        with open(output_file, 'a') as f:
-            f.write("\n# blastp run completed\n")
+        thread = threading.Thread(target=run_blast_for_genome, args=(query_file, db_subdir, db_dir, output_dir, 'blastp'))
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
 
 
 def main():
@@ -391,12 +421,16 @@ def main():
     # Decompress and create BLAST databases for protein files
     decompress_and_create_db(protein_dir, '_protein.faa.gz', db_type='prot')
 
-    # Run tblastn
-    run_tblastn(query_file, genome_dir, tblastn_output_dir)
+    # Run tblastn and blastp using threading
+    tblastn_thread = threading.Thread(target=run_tblastn, args=(query_file, genome_dir, tblastn_output_dir))
+    blastp_thread = threading.Thread(target=run_blastp, args=(query_file, protein_dir, blastp_output_dir))
 
-    # Run blastp
-    run_blastp(query_file, protein_dir, blastp_output_dir)
+    tblastn_thread.start()
+    blastp_thread.start()
+
+    tblastn_thread.join()
+    blastp_thread.join()
 
 if __name__ == '__main__':
     main()
-    print("OK\n")
+    print("\nOK\n")

@@ -150,17 +150,21 @@ def download_and_check_file(assembly_accession, assembly_name, file_type, output
     if not os.path.exists(file_path):
         for attempt in range(3):
             try:
+                print(f"  Downloading {filename} from {ftp_url} (Attempt {attempt + 1})")
                 logger.info(f"Downloading {filename} from {ftp_url} (Attempt {attempt + 1})")
                 download_genome_wget(ftp_url, output_dir, filename)
 
                 if check_file_integrity(file_path):
+                    print(f"  Download and integrity check passed for {filename}")
                     logger.info(f"Download and integrity check passed for {filename}")
                     with lock:
                         download_list.add(assembly_accession)
                     return True
                 else:
+                    print(f"  Download or integrity check failed for {filename}")
                     logger.error(f"Download or integrity check failed for {filename}")
             except subprocess.CalledProcessError as e:
+                print(f"  Failed to download {filename} (Attempt {attempt + 1}): {e}")
                 logger.error(f"Failed to download {filename} (Attempt {attempt + 1}): {e}")
         else:
             with lock:
@@ -200,12 +204,14 @@ def create_blast_db(fasta_file, db_type='nucl'):
         None
     """
     db_name = os.path.splitext(fasta_file)[0]
+    print(f"  Creating BLAST database for {os.path.basename(fasta_file)}")
     logger.info(f"Creating BLAST database for {os.path.basename(fasta_file)}")
     db_files = [f"{db_name}.fna.{ext}" for ext in ('nhr', 'nin', 'nsq', 'ndb', 'not', 'ntf', 'nto')] if db_type == 'nucl' else [f"{db_name}.faa.{ext}" for ext in ('phr', 'pin', 'psq', 'pdb', 'pot', 'ptf', 'pto')]
     if not all(os.path.exists(db_file) for db_file in db_files):
         cmd = ['makeblastdb', '-in', fasta_file, '-dbtype', db_type]
         subprocess.run(cmd, check=True)
     else:
+        print(f"  BLAST database for {os.path.basename(fasta_file)} already exists. Skipping creation.")
         logger.info(f"BLAST database for {os.path.basename(fasta_file)} already exists. Skipping creation.")
 
 
@@ -227,9 +233,14 @@ def download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downlo
         assembly_accession = row['Assembly Accession']
         assembly_name = row['Assembly Name']
 
+        print(f"Processing {assembly_accession} - {assembly_name}")
+        logger.info(f"Processing {assembly_accession} - {assembly_name}")
+
         # Skip already downloaded GCA and GCF with the same ID
         base_accession = assembly_accession.split('_')[1]
         if base_accession in downloaded_accessions:
+            print(f"  Skipping {assembly_accession} as it is already downloaded.")
+            logger.info(f"Skipping {assembly_accession} as it is already downloaded.")
             continue
 
         # Download and check genome file
@@ -251,6 +262,8 @@ def decompress_and_create_db_for_file(gz_file, output_dir, db_type):
     Returns:
         None
     """
+    print(f"  Decompressing {gz_file}")
+    logger.info(f"Decompressing {gz_file}")
     decompressed_file = decompress_gz_file(gz_file, output_dir)
     create_blast_db(decompressed_file, db_type=db_type)
 
@@ -293,10 +306,12 @@ def run_blast_for_genome(query_file, db_subdir, db_dir, output_dir, blast_type):
     # Check if the output file already has the completion marker
     if os.path.exists(output_file):
         with open(output_file, 'r') as f:
-            if f"#{blast_type} run completed" in f.read():
+            if f"# {blast_type} run completed" in f.read():
+                print(f"  Skipping {db_subdir} as it is already completed.")
                 logger.info(f"Skipping {db_subdir} as it is already completed.")
                 return
 
+    print(f"  Running {blast_type} for {db_subdir}...")
     logger.info(f"Running {blast_type} for {db_subdir}...")
     cmd = [
         blast_type,
@@ -376,9 +391,13 @@ def main():
     if not os.path.exists(blastp_output_dir):
         os.makedirs(blastp_output_dir)
 
+    print("Reading bacteria information...")
+    logger.info("Reading bacteria information...")
     bacteria_info = read_bacteria_info(tsv_file)
 
     # Read the lists of completed and incomplete downloads
+    print("Reading download lists...")
+    logger.info("Reading download lists...")
     if os.path.exists(genome_complete_file):
         with open(genome_complete_file, 'r') as f:
             genome_complete_downloads = set(f.read().splitlines())
@@ -398,6 +417,8 @@ def main():
         failed_downloads = set()
 
     # Scan existing genome and protein files
+    print("Scanning existing files...")
+    logger.info("Scanning existing files...")
     genome_complete = scan_existing_files(genome_dir, '_genomic.fna.gz')
     protein_complete = scan_existing_files(protein_dir, '_protein.faa.gz')
 
@@ -407,21 +428,33 @@ def main():
     lock = threading.Lock()
 
     # Download data
+    print("Downloading data...")
+    logger.info("Downloading data...")
     download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downloads, protein_complete_downloads, failed_downloads, lock)
 
     # Save the lists of completed and incomplete downloads
+    print("Updating download lists...")
+    logger.info("Updating download lists...")
     update_download_lists(genome_complete_file, protein_complete_file, genome_complete_downloads, protein_complete_downloads)
 
     # Save the list of failed downloads
+    print("Updating failed downloads list...")
+    logger.info("Updating failed downloads list...")
     update_failed_list(failed_file, failed_downloads)
 
     # Decompress and create BLAST databases for genome files
+    print("Decompressing and creating BLAST databases for genome files...")
+    logger.info("Decompressing and creating BLAST databases for genome files...")
     decompress_and_create_db(genome_dir, '_genomic.fna.gz', db_type='nucl')
 
     # Decompress and create BLAST databases for protein files
+    print("Decompressing and creating BLAST databases for protein files...")
+    logger.info("Decompressing and creating BLAST databases for protein files...")
     decompress_and_create_db(protein_dir, '_protein.faa.gz', db_type='prot')
 
     # Run tblastn and blastp using threading
+    print("Running tblastn and blastp...")
+    logger.info("Running tblastn and blastp...")
     tblastn_thread = threading.Thread(target=run_tblastn, args=(query_file, genome_dir, tblastn_output_dir))
     blastp_thread = threading.Thread(target=run_blastp, args=(query_file, protein_dir, blastp_output_dir))
 

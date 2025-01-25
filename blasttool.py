@@ -3,18 +3,18 @@ import pandas as pd
 import subprocess
 import gzip
 import shutil
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from logging.handlers import QueueHandler, QueueListener
 import queue
+import json
 
 # Configure logging
 log_queue = queue.Queue()
 queue_handler = QueueHandler(log_queue)
 formatter = logging.Formatter('%(asctime)s %(message)s')
-handler = logging.FileHandler('wget.log')
+handler = logging.FileHandler('blast_tool.log')
 handler.setFormatter(formatter)
 listener = QueueListener(log_queue, handler)
 listener.start()
@@ -23,6 +23,18 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(queue_handler)
 
+def read_config(config_file):
+    """Read configuration from a JSON file.
+
+    Args:
+        config_file: Path to the JSON configuration file.
+
+    Returns:
+        Dictionary containing configuration settings.
+    """
+    with open(config_file, 'r') as f:
+        config = json.load(f)
+    return config
 
 def read_bacteria_info(tsv_file):
     """Read bacterial genome information from a TSV file.
@@ -34,7 +46,6 @@ def read_bacteria_info(tsv_file):
         DataFrame containing genome information.
     """
     return pd.read_csv(tsv_file, sep='\t')
-
 
 def download_genome_wget(ftp_url, output_dir, filename):
     """Download bacterial genome file using wget.
@@ -55,7 +66,6 @@ def download_genome_wget(ftp_url, output_dir, filename):
         logger.error(result.stderr)
     return local_filepath
 
-
 def check_file_integrity(filepath):
     """Check if the downloaded file is complete.
 
@@ -74,7 +84,6 @@ def check_file_integrity(filepath):
         logger.error(f"File integrity check failed for {filepath}: {e}")
         return False
 
-
 def update_download_lists(complete_file, incomplete_file, complete_downloads, incomplete_downloads):
     """Update the lists of completed and incomplete downloads.
 
@@ -90,7 +99,6 @@ def update_download_lists(complete_file, incomplete_file, complete_downloads, in
     with open(incomplete_file, 'w') as f:
         f.write('\n'.join(incomplete_downloads))
 
-
 def update_failed_list(failed_file, failed_downloads):
     """Update the list of failed downloads.
 
@@ -100,7 +108,6 @@ def update_failed_list(failed_file, failed_downloads):
     """
     with open(failed_file, 'w') as f:
         f.write('\n'.join(failed_downloads))
-
 
 def scan_existing_files(directory, extension):
     """Scan existing files in a directory and check their integrity.
@@ -121,8 +128,7 @@ def scan_existing_files(directory, extension):
                 existing_files.add(accession)
     return existing_files
 
-
-def download_and_check_file(assembly_accession, assembly_name, file_type, output_dir, download_list, failed_downloads, lock):
+def download_and_check_file(assembly_accession, assembly_name, file_type, output_dir, download_list, failed_downloads, lock, retries, retry_delay):
     """Download and check the integrity of a file.
 
     Args:
@@ -133,6 +139,8 @@ def download_and_check_file(assembly_accession, assembly_name, file_type, output
         download_list: Set of downloaded files.
         failed_downloads: Set of failed downloads.
         lock: Threading lock for thread safety.
+        retries: Number of download retries.
+        retry_delay: Delay between retries in seconds.
 
     Returns:
         Boolean indicating whether the download and integrity check were successful.
@@ -148,7 +156,7 @@ def download_and_check_file(assembly_accession, assembly_name, file_type, output
         if not check_file_integrity(file_path):
             os.remove(file_path)
     if not os.path.exists(file_path):
-        for attempt in range(3):
+        for attempt in range(retries):
             try:
                 print(f"  Downloading {filename} from {ftp_url} (Attempt {attempt + 1})")
                 logger.info(f"Downloading {filename} from {ftp_url} (Attempt {attempt + 1})")
@@ -166,12 +174,12 @@ def download_and_check_file(assembly_accession, assembly_name, file_type, output
             except subprocess.CalledProcessError as e:
                 print(f"  Failed to download {filename} (Attempt {attempt + 1}): {e}")
                 logger.error(f"Failed to download {filename} (Attempt {attempt + 1}): {e}")
+            time.sleep(retry_delay)
         else:
             with lock:
                 failed_downloads.add(assembly_accession)
             return False
     return True
-
 
 def decompress_gz_file(gz_file, output_dir):
     """Decompress a .gz file into a separate directory.
@@ -191,7 +199,6 @@ def decompress_gz_file(gz_file, output_dir):
         with open(decompressed_file, 'wb') as f_out:
             shutil.copyfileobj(f_in, f_out)
     return decompressed_file
-
 
 def create_blast_db(fasta_file, db_type='nucl'):
     """Create a BLAST database from a FASTA file.
@@ -214,8 +221,7 @@ def create_blast_db(fasta_file, db_type='nucl'):
         print(f"  BLAST database for {os.path.basename(fasta_file)} already exists. Skipping creation.")
         logger.info(f"BLAST database for {os.path.basename(fasta_file)} already exists. Skipping creation.")
 
-
-def download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downloads, protein_complete_downloads, failed_downloads, lock):
+def download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downloads, protein_complete_downloads, failed_downloads, lock, retries, retry_delay):
     """Download genome and protein data.
 
     Args:
@@ -226,6 +232,8 @@ def download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downlo
         protein_complete_downloads: Set of completed protein downloads.
         failed_downloads: Set of failed downloads.
         lock: Threading lock for thread safety.
+        retries: Number of download retries.
+        retry_delay: Delay between retries in seconds.
     """
     downloaded_accessions = genome_complete_downloads.intersection(protein_complete_downloads)
 
@@ -244,12 +252,11 @@ def download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downlo
             continue
 
         # Download and check genome file
-        if download_and_check_file(assembly_accession, assembly_name, 'genomic', genome_dir, genome_complete_downloads, failed_downloads, lock):
+        if download_and_check_file(assembly_accession, assembly_name, 'genomic', genome_dir, genome_complete_downloads, failed_downloads, lock, retries, retry_delay):
             downloaded_accessions.add(base_accession)
 
         # Download and check protein file
-        download_and_check_file(assembly_accession, assembly_name, 'protein', protein_dir, protein_complete_downloads, failed_downloads, lock)
-
+        download_and_check_file(assembly_accession, assembly_name, 'protein', protein_dir, protein_complete_downloads, failed_downloads, lock, retries, retry_delay)
 
 def decompress_and_create_db_for_file(gz_file, output_dir, db_type):
     """Decompress a file and create a BLAST database.
@@ -267,17 +274,16 @@ def decompress_and_create_db_for_file(gz_file, output_dir, db_type):
     decompressed_file = decompress_gz_file(gz_file, output_dir)
     create_blast_db(decompressed_file, db_type=db_type)
 
-
-def decompress_and_create_db(directory, extension, db_type):
+def decompress_and_create_db(directory, extension, db_type, max_workers):
     """Decompress files and create BLAST databases.
 
     Args:
         directory: Directory containing the files.
         extension: File extension to look for.
         db_type: Type of the database ('nucl' for nucleotide, 'prot' for protein).
+        max_workers: Maximum number of worker threads.
     """
-    max_threads = os.cpu_count() // 3
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for filename in os.listdir(directory):
             if filename.endswith(extension):
@@ -285,7 +291,6 @@ def decompress_and_create_db(directory, extension, db_type):
                 futures.append(executor.submit(decompress_and_create_db_for_file, gz_file, directory, db_type))
         for future in futures:
             future.result()
-
 
 def run_blast_for_genome(query_file, db_subdir, db_dir, output_dir, blast_type):
     """Run BLAST for a specific genome.
@@ -324,7 +329,6 @@ def run_blast_for_genome(query_file, db_subdir, db_dir, output_dir, blast_type):
     with open(output_file, 'a') as f:
         f.write(f"\n# {blast_type} run completed\n")
 
-
 def run_tblastn(query_file, db_dir, output_dir):
     """Run tblastn using the sequences from the query file.
 
@@ -345,7 +349,6 @@ def run_tblastn(query_file, db_dir, output_dir):
 
     for thread in threads:
         thread.join()
-
 
 def run_blastp(query_file, db_dir, output_dir):
     """Run blastp using the sequences from the query file.
@@ -368,18 +371,24 @@ def run_blastp(query_file, db_dir, output_dir):
     for thread in threads:
         thread.join()
 
-
 def main():
-    tsv_file = './bacteria20.tsv'
+    config_file = './config.json'
+    config = read_config(config_file)
+
+    tsv_file = config['file_paths']['tsv_file']
+    query_file = config['file_paths']['query_file']
+    genome_complete_file = config['file_paths']['genome_complete']
+    protein_complete_file = config['file_paths']['protein_complete']
+    failed_file = config['file_paths']['failed']
     output_dir = os.getcwd()
-    genome_dir = os.path.join(output_dir, 'bacteria_genome')
-    protein_dir = os.path.join(output_dir, 'bacteria_protein')
-    genome_complete_file = 'genome_complete_downloads.txt'
-    protein_complete_file = 'protein_complete_downloads.txt'
-    failed_file = 'failed_downloads.txt'
-    query_file = './copper_protein_as_tblastn_query.txt'
-    tblastn_output_dir = os.path.join(output_dir, 'tblastn_results')
-    blastp_output_dir = os.path.join(output_dir, 'blastp_results')
+    genome_dir = os.path.join(output_dir, config['directories']['genome'])
+    protein_dir = os.path.join(output_dir, config['directories']['protein'])
+    tblastn_output_dir = os.path.join(output_dir, config['directories']['tblastn_output'])
+    blastp_output_dir = os.path.join(output_dir, config['directories']['blastp_output'])
+    max_workers_download = config['max_workers_download']
+    max_workers_decompress = config['max_workers_decompress']
+    download_retries = config['download_retries']
+    retry_delay = config['retry_delay']
 
     # Create directories to save genome and protein files
     if not os.path.exists(genome_dir):
@@ -430,7 +439,7 @@ def main():
     # Download data
     print("Downloading data...")
     logger.info("Downloading data...")
-    download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downloads, protein_complete_downloads, failed_downloads, lock)
+    download_data(bacteria_info, genome_dir, protein_dir, genome_complete_downloads, protein_complete_downloads, failed_downloads, lock, download_retries, retry_delay)
 
     # Save the lists of completed and incomplete downloads
     print("Updating download lists...")
@@ -445,12 +454,12 @@ def main():
     # Decompress and create BLAST databases for genome files
     print("Decompressing and creating BLAST databases for genome files...")
     logger.info("Decompressing and creating BLAST databases for genome files...")
-    decompress_and_create_db(genome_dir, '_genomic.fna.gz', db_type='nucl')
+    decompress_and_create_db(genome_dir, '_genomic.fna.gz', db_type='nucl', max_workers=max_workers_decompress)
 
     # Decompress and create BLAST databases for protein files
     print("Decompressing and creating BLAST databases for protein files...")
     logger.info("Decompressing and creating BLAST databases for protein files...")
-    decompress_and_create_db(protein_dir, '_protein.faa.gz', db_type='prot')
+    decompress_and_create_db(protein_dir, '_protein.faa.gz', db_type='prot', max_workers=max_workers_decompress)
 
     # Run tblastn and blastp using threading
     print("Running tblastn and blastp...")
